@@ -1,121 +1,40 @@
-name: Generate and Commit NES ROMs
+name: Generate NES ROMs
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'モードを選択 (color or mono)'
-        required: true
-        default: 'color'
-      branch:
-        description: '実行対象ブランチ'
-        required: true
-        default: 'main'
 
 permissions:
-  contents: write  # リポジトリへの書き込み権限を付与
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-      with:
-        ref: ${{ github.event.inputs.branch }}
-        persist-credentials: true
+    - uses: actions/checkout@v3
 
-    - name: Set up Python 3.10
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
+        pip install --upgrade pip
         pip install Pillow moviepy numpy
 
-    - name: Generate NES ROMs
+    - name: Generate ROMs
       run: |
-        mkdir -p output
-        for file in media/*; do
-          case "${file,,}" in
-            *.png|*.jpg|*.jpeg|*.mp4) ;;
-            *) continue ;;
-          esac
-          base=$(basename "$file")
-          name="${base%.*}"
-          echo "Processing $file → output/${name}.nes"
-          python - << 'EOF'
-import os, numpy as np
-from PIL import Image
-from moviepy.editor import VideoFileClip
+        python scripts/gen_rom.py color
 
-NES_PALETTE = np.array([
-    [124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],
-    [168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],
-    [0,64,88],[0,0,0],[0,0,0],[0,0,0],[188,188,188],[0,120,248],
-    [0,88,248],[104,68,252],[216,0,204],[228,0,88],[248,56,0],[228,92,16],
-    [172,124,0],[0,184,0],[0,168,0],[0,168,68],[0,136,136],[0,0,0],
-    [0,0,0],[0,0,0]
-])
-def map_to_tiles(frame, mode):
-    h,w,_ = frame.shape
-    data=[]
-    for ty in range(0,h,8):
-      for tx in range(0,w,8):
-        plane0,plane1=[],[]
-        tile=frame[ty:ty+8,tx:tx+8]
-        for row in tile:
-          b0=b1=0
-          for px in row:
-            r,g,b=px
-            if mode=='mono':
-              lum=0.3*r+0.59*g+0.11*b
-              idx=0 if lum>128 else 1
-            else:
-              d=((NES_PALETTE-px)**2).sum(axis=1)
-              idx=int(np.argmin(d))%4
-            b0=(b0<<1)|(idx&1)
-            b1=(b1<<1)|((idx>>1)&1)
-          plane0.append(b0); plane1.append(b1)
-        data+=plane0+plane1
-    return data
-
-mode=os.getenv('MODE','color')
-for fname in os.listdir('media'):
-    if not fname.lower().endswith(('.png','.jpg','.jpeg','.mp4')): continue
-    path=os.path.join('media',fname)
-    chr_bytes=[]
-    if path.lower().endswith(('.png','.jpg','.jpeg')):
-        img=np.array(Image.open(path).convert('RGB').resize((256,240)))
-        chr_bytes=map_to_tiles(img,mode)
-    else:
-        clip=VideoFileClip(path)
-        for t in np.arange(0, clip.duration, 1/10):
-            frame=clip.get_frame(t)
-            arr=np.array(Image.fromarray(frame).resize((256,240)))
-            chr_bytes+=map_to_tiles(arr,mode)
-    prg_banks=1; chr_banks=(len(chr_bytes)+8191)//8192
-    header=bytearray(16); header[0:4]=b'NES\x1A'; header[4]=prg_banks; header[5]=chr_banks
-    prg=bytearray(prg_banks*16384); chr_blob=bytearray(chr_banks*8192); chr_blob[:len(chr_bytes)]=bytearray(chr_bytes)
-    out_path=os.path.join('output', f'{os.path.splitext(fname)[0]}.nes')
-    os.makedirs('output', exist_ok=True)
-    with open(out_path, 'wb') as f: f.write(header + prg + chr_blob)
-    print('Generated', out_path)
-EOF
-      env:
-        MODE: ${{ github.event.inputs.mode }}
-
-    - name: Commit and push ROMs
+    - name: Commit & Push
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add output/
         if git diff --cached --quiet; then
-          echo "No changes to commit"
+          echo "No changes."
         else
-          git commit -m "chore: add generated NES ROMs [mode=${{ github.event.inputs.mode }}]"
-          git push origin ${{ github.event.inputs.branch }}
+          git commit -m "chore: add generated .nes ROMs"
+          git push
         fi
