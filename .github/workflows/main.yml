@@ -1,0 +1,119 @@
+name: Generate NES ROMs
+
+on:
+  workflow_dispatch:    # 手動トリガー
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install Pillow moviepy numpy
+
+    - name: Generate NES ROMs
+      run: |
+        mkdir -p output
+        for file in media/*; do
+          case "${file,,}" in
+            *.png|*.jpg|*.jpeg|*.mp4) ;;
+            *) continue ;;
+          esac
+          base=$(basename "$file")
+          name="${base%.*}"
+          echo "Processing $file → output/${name}.nes"
+          python - << 'EOF'
+import sys, os
+import numpy as np
+from PIL import Image
+from moviepy.editor import VideoFileClip
+
+NES_PALETTE = np.array([
+    [124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],
+    [168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],
+    [0,64,88],[0,0,0],[0,0,0],[0,0,0],[188,188,188],[0,120,248],
+    [0,88,248],[104,68,252],[216,0,204],[228,0,88],[248,56,0],[228,92,16],
+    [172,124,0],[0,184,0],[0,168,0],[0,168,68],[0,136,136],[0,0,0],
+    [0,0,0],[0,0,0]
+])
+
+def map_to_tiles(frame_array, mode):
+    h, w, _ = frame_array.shape
+    chr_bytes = []
+    for ty in range(0, h, 8):
+        for tx in range(0, w, 8):
+            plane0 = []
+            plane1 = []
+            tile = frame_array[ty:ty+8, tx:tx+8]
+            for row in tile:
+                b0 = 0
+                b1 = 0
+                for px in row:
+                    r, g, b = px
+                    if mode == 'mono':
+                        lum = 0.3*r + 0.59*g + 0.11*b
+                        idx = 0 if lum > 128 else 1
+                    else:
+                        d = ((NES_PALETTE - px)**2).sum(axis=1)
+                        idx = int(np.argmin(d)) % 4
+                    bit0 = idx & 1
+                    bit1 = (idx >> 1) & 1
+                    b0 = (b0 << 1) | bit0
+                    b1 = (b1 << 1) | bit1
+                plane0.append(b0)
+                plane1.append(b1)
+            chr_bytes.extend(plane0 + plane1)
+    return chr_bytes
+
+def write_rom(chr_data, out_path):
+    prg_banks = 1
+    chr_banks = (len(chr_data) + 8191) // 8192
+    header = bytearray(16)
+    header[0:4] = b'NES\x1A'
+    header[4] = prg_banks
+    header[5] = chr_banks
+    prg = bytearray(prg_banks * 16384)
+    chr = bytearray(chr_banks * 8192)
+    chr[:len(chr_data)] = bytearray(chr_data)
+    with open(out_path, 'wb') as f:
+        f.write(header)
+        f.write(prg)
+        f.write(chr)
+
+input_path = os.environ['file']
+base = os.path.splitext(os.path.basename(input_path))[0]
+mode = os.getenv('MODE', 'color')
+if input_path.lower().endswith(('.png','.jpg','.jpeg')):
+    img = Image.open(input_path).convert('RGB').resize((256,240))
+    arr = np.array(img)
+    chr_data = map_to_tiles(arr, mode)
+else:
+    clip = VideoFileClip(input_path)
+    chr_data = []
+    for t in np.arange(0, clip.duration, 1/10):
+        frame = clip.get_frame(t)
+        arr = np.array(Image.fromarray(frame).resize((256,240)))
+        chr_data.extend(map_to_tiles(arr, mode))
+out_file = os.path.join('output', f'{base}.nes')
+write_rom(chr_data, out_file)
+print(f'☑ Generated {out_file}')
+EOF
+        done
+
+    - name: Upload generated ROMs
+      uses: actions/upload-artifact@v3
+      with:
+        name: nes-roms
+        path: output/*.nes
+      env:
+        MODE: color   # モード: color または mono (必要に応じて変更)
