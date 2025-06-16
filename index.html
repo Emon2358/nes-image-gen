@@ -2,137 +2,87 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>画像／動画 → NES-ROM ジェネレータ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NES Image → ROM Converter (GitHub Pages)</title>
   <style>
-    body { font-family: sans-serif; padding: 1rem; }
-    #controls { margin-bottom: 1rem; }
-    #downloadLink { display: block; margin-top: 1rem; }
+    body { font-family: sans-serif; padding: 2rem; max-width: 640px; margin: auto; }
+    input, button { font-size: 1rem; margin-top: 1rem; }
+    canvas { display: none; }
   </style>
 </head>
 <body>
-  <h1>画像／動画 → NES-ROM ジェネレータ</h1>
-  <div id="controls">
-    <input type="file" id="uploader" accept="image/*,video/*">
-    <label>
-      <input type="radio" name="mode" value="color" checked> フルカラー
-    </label>
-    <label>
-      <input type="radio" name="mode" value="mono"> 単色（モノクロ）
-    </label>
-    <button id="generateBtn">ROMを生成</button>
-  </div>
-  <a id="downloadLink" href="#" download="image_movie.nes" style="visibility:hidden">ROMをダウンロード</a>
-
-  <canvas id="workCanvas" width="256" height="240" style="display:none;"></canvas>
-  <video id="workVideo" width="256" height="240" style="display:none;"></video>
+  <h1>NES Image → ROM Converter</h1>
+  <p>画像ファイルを選択すると、ブラウザ内でNES用ROMを生成し、ダウンロードします。</p>
+  <input type="file" id="imageInput" accept="image/*">
+  <button id="convertBtn" disabled>ROMを生成してダウンロード</button>
+  <canvas id="canvas" width="256" height="240"></canvas>
 
   <script>
-  const NES_PALETTE = [
-    [124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],
-    [168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],
-    [0,64,88],[0,0,0],[0,0,0],[0,0,0],[188,188,188],[0,120,248],
-    [0,88,248],[104,68,252],[216,0,204],[228,0,88],[248,56,0],[228,92,16],
-    [172,124,0],[0,184,0],[0,168,0],[0,168,68],[0,136,136],[0,0,0],
-    [0,0,0],[0,0,0]
-  ];
+  document.getElementById('imageInput').addEventListener('change', e => {
+    document.getElementById('convertBtn').disabled = !e.target.files.length;
+  });
 
-  document.getElementById('generateBtn').addEventListener('click', async () => {
-    const file = document.getElementById('uploader').files[0];
-    if (!file) return alert('画像または動画を選択してください。');
-
-    const mode = document.querySelector('input[name="mode"]:checked').value;
-    const canvas = document.getElementById('workCanvas');
-    const ctx = canvas.getContext('2d');
-
-    let frames = [];
-    if (file.type.startsWith('image/')) {
-      // 画像１枚
-      const img = await createImageBitmap(file);
+  document.getElementById('convertBtn').addEventListener('click', () => {
+    const file = document.getElementById('imageInput').files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      // 256x240にフィット
+      ctx.clearRect(0,0,256,240);
       ctx.drawImage(img, 0, 0, 256, 240);
-      frames.push(ctx.getImageData(0,0,256,240).data);
-    } else if (file.type.startsWith('video/')) {
-      // 動画をフレーム取得
-      const video = document.getElementById('workVideo');
-      video.src = URL.createObjectURL(file);
-      await new Promise(res => video.onloadedmetadata = res);
-      const fps = 10; // 1秒あたり取得フレーム数
-      const duration = video.duration;
-      for (let t = 0; t < duration; t += 1/fps) {
-        await new Promise(r => {
-          video.currentTime = t;
-          video.onseeked = () => {
-            ctx.drawImage(video, 0, 0, 256, 240);
-            frames.push(ctx.getImageData(0,0,256,240).data);
-            r();
-          };
-        });
+      const imgData = ctx.getImageData(0,0,256,240).data;
+      // 4色に量子化: 閾値で分割
+      const palette = [64, 128, 192];
+      const pixels = new Uint8Array(256*240);
+      for (let i=0, j=0; i<imgData.length; i+=4, j++) {
+        const r = imgData[i];
+        // グレースケール値
+        const gray = (imgData[i]*0.299 + imgData[i+1]*0.587 + imgData[i+2]*0.114)|0;
+        let val = gray < palette[0] ? 0 : gray < palette[1] ? 1 : gray < palette[2] ? 2 : 3;
+        pixels[j] = val;
       }
-    } else {
-      return alert('サポート外のファイル形式です。');
-    }
-
-    // 各フレーム → CHRバイト列に変換
-    let allCHR = [];
-    for (let imgData of frames) {
-      for (let ty = 0; ty < 240; ty += 8) {
-        for (let tx = 0; tx < 256; tx += 8) {
-          let plane0 = new Uint8Array(8), plane1 = new Uint8Array(8);
-          for (let y = 0; y < 8; y++) {
-            let b0 = 0, b1 = 0;
-            for (let x = 0; x < 8; x++) {
-              const idx = ((ty+y)*256 + (tx+x))*4;
-              const [r,g,b] = [imgData[idx], imgData[idx+1], imgData[idx+2]];
-              let colorIndex = 0;
-              if (mode === 'mono') {
-                // 単色：輝度閾値128
-                const lum = 0.3*r + 0.59*g + 0.11*b;
-                colorIndex = lum > 128 ? 0 : 1;
-              } else {
-                // フルカラー：最近似NESパレット
-                let best=0,bd=1e9;
-                NES_PALETTE.forEach((c,i)=>{
-                  const d=(r-c[0])**2+(g-c[1])**2+(b-c[2])**2;
-                  if(d<bd){bd=d;best=i;}
-                });
-                colorIndex = best % 4; // 2ビット（0〜3）に切り捨て
-              }
-              const bit0 =  colorIndex & 1;
-              const bit1 = (colorIndex >> 1) & 1;
-              b0 = (b0 << 1) | bit0;
-              b1 = (b1 << 1) | bit1;
+      // タイル→CHRバイト列
+      const tilesX = 256/8, tilesY = 240/8;
+      const chrBytes = [];
+      for (let ty=0; ty<tilesY; ty++) {
+        for (let tx=0; tx<tilesX; tx++) {
+          for (let row=0; row<8; row++) {
+            let plane0 = 0, plane1 = 0;
+            for (let col=0; col<8; col++) {
+              const p = pixels[(ty*8+row)*256 + (tx*8+col)];
+              plane0 |= (p & 1) << (7-col);
+              plane1 |= ((p>>1) & 1) << (7-col);
             }
-            plane0[y] = b0;
-            plane1[y] = b1;
+            chrBytes.push(plane0, plane1);
           }
-          allCHR.push(...plane0, ...plane1);
         }
       }
-    }
-
-    // iNESヘッダ生成
-    const prgBanks = 1;
-    const chrBanks = Math.ceil(allCHR.length / 8192);
-    let header = new Uint8Array(16);
-    header.set([0x4E,0x45,0x53,0x1A]);  // "NES<EOF>"
-    header[4] = prgBanks;
-    header[5] = chrBanks;
-
-    // PRGとCHRを結合
-    const prg = new Uint8Array(prgBanks * 16384);
-    const chr = new Uint8Array(chrBanks * 8192);
-    chr.set(allCHR.slice(0, chrBanks*8192));
-
-    const rom = new Uint8Array(16 + prg.length + chr.length);
-    rom.set(header, 0);
-    rom.set(prg, 16);
-    rom.set(chr, 16 + prg.length);
-
-    // ダウンロードリンク
-    const blob = new Blob([rom], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const link = document.getElementById('downloadLink');
-    link.href = url;
-    link.style.visibility = 'visible';
+      // CHRを8KB境界でパディング
+      const chrSize = Math.ceil(chrBytes.length / 8192) * 8192;
+      const chr = new Uint8Array(chrSize);
+      chr.set(chrBytes);
+      // ヘッダ
+      const header = new Uint8Array(16);
+      header.set([0x4E,0x45,0x53,0x1A, 1, chrSize/8192], 0);
+      // PRG: 16KB NOP (0xEA)
+      const prg = new Uint8Array(16*1024).fill(0xEA);
+      // 完成ROM
+      const rom = new Uint8Array(header.length + prg.length + chr.length);
+      rom.set(header,0);
+      rom.set(prg, header.length);
+      rom.set(chr, header.length + prg.length);
+      // ダウンロード
+      const blob = new Blob([rom], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'image.nes';
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    img.src = URL.createObjectURL(file);
   });
   </script>
 </body>
